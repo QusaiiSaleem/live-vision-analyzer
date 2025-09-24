@@ -1,0 +1,10 @@
+{
+  "app": {
+    "withGlobalTauri": true,
+    "security": {
+      "dangerousUseHttpScheme": false,
+      "dangerousInsecureOriginAllowed": false,
+      "dangerousRemoteDomainIpcAccess": []
+    }
+  }
+}
