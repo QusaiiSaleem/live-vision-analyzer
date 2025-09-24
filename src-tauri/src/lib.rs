@@ -1,8 +1,10 @@
 mod ollama_manager;
 mod yolo_detector;
+mod moondream_manager;
 
 use ollama_manager::{OllamaManager, OllamaStatus};
 use yolo_detector::{YoloDetector, DetectionData};
+use moondream_manager::{MoondreamManager, AnalysisResult};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::{Manager, State};
@@ -12,6 +14,7 @@ use tokio::sync::Mutex;
 struct AppState {
     ollama: Arc<Mutex<OllamaManager>>,
     yolo: Arc<Mutex<YoloDetector>>,
+    moondream: Arc<Mutex<MoondreamManager>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -220,6 +223,139 @@ async fn analyze_with_llava(
     Ok(result)
 }
 
+// Phase 1 POC: Moondream 3 MoE Integration Commands
+
+#[tauri::command]
+async fn analyze_with_moondream(
+    state: State<'_, AppState>,
+    frame_base64: String,
+    prompt: String,
+) -> Result<AnalysisResult, String> {
+    println!("🌙 analyze_with_moondream called");
+    let moondream = state.moondream.lock().await;
+    moondream.query(frame_base64, prompt).await
+}
+
+#[tauri::command]
+async fn moondream_caption(
+    state: State<'_, AppState>,
+    frame_base64: String,
+    length: Option<String>,
+) -> Result<AnalysisResult, String> {
+    println!("🌙 moondream_caption called");
+    let moondream = state.moondream.lock().await;
+    moondream.caption(frame_base64, length).await
+}
+
+#[tauri::command]
+async fn moondream_detect(
+    state: State<'_, AppState>,
+    frame_base64: String,
+    object: String,
+) -> Result<AnalysisResult, String> {
+    println!("🌙 moondream_detect called");
+    let moondream = state.moondream.lock().await;
+    moondream.detect(frame_base64, object).await
+}
+
+#[tauri::command]
+async fn moondream_point(
+    state: State<'_, AppState>,
+    frame_base64: String,
+    object: String,
+) -> Result<AnalysisResult, String> {
+    println!("🌙 moondream_point called");
+    let moondream = state.moondream.lock().await;
+    moondream.point(frame_base64, object).await
+}
+
+#[tauri::command]
+async fn moondream_analyze_retail(
+    state: State<'_, AppState>,
+    frame_base64: String,
+    scene_type: String,
+) -> Result<AnalysisResult, String> {
+    println!("🌙 moondream_analyze_retail called for scene: {}", scene_type);
+    let moondream = state.moondream.lock().await;
+    moondream.analyze_retail_scene(frame_base64, &scene_type).await
+}
+
+#[tauri::command]
+async fn check_moondream_status(
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    println!("🌙 check_moondream_status called");
+    let moondream = state.moondream.lock().await;
+    moondream.check_status().await
+}
+
+// A/B Testing Command - Compare LLaVA vs Moondream
+#[tauri::command]
+async fn analyze_ab_test(
+    state: State<'_, AppState>,
+    frame_base64: String,
+    prompt: String,
+) -> Result<serde_json::Value, String> {
+    println!("🔬 Running A/B test: LLaVA vs Moondream");
+
+    let start_time = std::time::Instant::now();
+
+    // Run both analyses concurrently
+    let (llava_result, moondream_result) = tokio::join!(
+        analyze_with_llava_internal(&state, frame_base64.clone(), prompt.clone()),
+        analyze_with_moondream_internal(&state, frame_base64, prompt)
+    );
+
+    let total_time = start_time.elapsed().as_millis() as u64;
+
+    Ok(serde_json::json!({
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "llava": llava_result,
+        "moondream": moondream_result,
+        "total_comparison_time_ms": total_time,
+        "test_id": uuid::Uuid::new_v4().to_string()
+    }))
+}
+
+// Internal helper functions for A/B testing
+async fn analyze_with_llava_internal(
+    state: &State<'_, AppState>,
+    frame_base64: String,
+    prompt: String,
+) -> serde_json::Value {
+    match analyze_with_llava(state.clone(), frame_base64, prompt, Some(30000)).await {
+        Ok(result) => serde_json::json!({
+            "success": true,
+            "result": result,
+            "provider": "llava"
+        }),
+        Err(error) => serde_json::json!({
+            "success": false,
+            "error": error,
+            "provider": "llava"
+        })
+    }
+}
+
+async fn analyze_with_moondream_internal(
+    state: &State<'_, AppState>,
+    frame_base64: String,
+    prompt: String,
+) -> serde_json::Value {
+    match analyze_with_moondream(state.clone(), frame_base64, prompt).await {
+        Ok(result) => serde_json::json!({
+            "success": true,
+            "result": result,
+            "provider": "moondream"
+        }),
+        Err(error) => serde_json::json!({
+            "success": false,
+            "error": error,
+            "provider": "moondream"
+        })
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -227,6 +363,16 @@ pub fn run() {
         .setup(|app| {
             let ollama_manager = OllamaManager::new(&app.handle());
             let mut yolo_detector = YoloDetector::new();
+
+            // Initialize Moondream manager with API key from environment
+            let moondream_api_key = std::env::var("MOONDREAM_API_KEY")
+                .unwrap_or_else(|_| {
+                    eprintln!("⚠️ MOONDREAM_API_KEY not found in environment");
+                    "".to_string()
+                });
+
+            let moondream_manager = MoondreamManager::new(moondream_api_key);
+            println!("🌙 Moondream 3 MoE Manager initialized");
 
             // Initialize YOLO detector
             tauri::async_runtime::block_on(async {
@@ -238,6 +384,7 @@ pub fn run() {
             let app_state = AppState {
                 ollama: Arc::new(Mutex::new(ollama_manager)),
                 yolo: Arc::new(Mutex::new(yolo_detector)),
+                moondream: Arc::new(Mutex::new(moondream_manager)),
             };
 
             app.manage(app_state);
@@ -287,7 +434,15 @@ pub fn run() {
             analyze_image,
             capture_camera_frame,
             yolo_detect,
-            analyze_with_llava
+            analyze_with_llava,
+            // Phase 1 POC: Moondream 3 MoE commands
+            analyze_with_moondream,
+            moondream_caption,
+            moondream_detect,
+            moondream_point,
+            moondream_analyze_retail,
+            check_moondream_status,
+            analyze_ab_test
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
